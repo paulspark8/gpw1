@@ -1,5 +1,5 @@
+import io
 import re
-import os
 from typing import List
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
@@ -13,6 +13,7 @@ import email.header
 import pydnsbl
 from lingua import LanguageDetectorBuilder, Language
 from PIL import Image
+import pytesseract
 # IP
 
 
@@ -255,11 +256,21 @@ def subject_filter(mail: email.message.Message, filter: list) -> bool:
 
 # IMAGES
 
-def image_extractor(mail: email.message.Message)->Image:
+def image_text_extractor(mail: email.message.Message)->list:
     images = []
     for part in mail.walk():
         if part.get_content_maintype() == 'image':
-            image_data = part.get_payload(decode=True)
-            image = Image.open(io.BytesIO(image_data))
-            images.append(image)
-
+            data = part.get_payload(decode=True)
+            try:
+                image = Image.open(io.BytesIO(data))
+                images.append(image)
+            except Exception as e:
+                print('Error on image proccesing:', e)
+    extracted_text = []
+    for idx, image in enumerate(images):
+        try:
+            text = pytesseract.image_to_string(image)
+            extracted_text.append(text)
+        except Exception as e:
+            print("Error on character detection:", e)
+    return extracted_text
