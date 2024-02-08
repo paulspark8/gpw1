@@ -2964,7 +2964,7 @@ def test_domain_age():
 
 
 def test_sender_filter():
-    fil = [".*anghel*", "@mail.com"]
+    fil = [".*anghel*", "@mail.com", "contact"]
 
     for mail in mails:
         mail = email.message_from_string(mail)

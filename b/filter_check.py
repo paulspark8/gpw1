@@ -174,6 +174,7 @@ def SPF_extractor(domain: str) -> tuple[str, int]:
 
 
 def header_check_filter(mail, header: str, filters: list = None) -> bool:
+    # print('H',mail[header])
     if mail[header] is None:
         return False
     if filters is None:
