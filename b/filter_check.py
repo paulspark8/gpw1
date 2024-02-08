@@ -14,6 +14,11 @@ import pydnsbl
 from lingua import LanguageDetectorBuilder, Language
 from PIL import Image
 import pytesseract
+
+import warnings
+from bs4 import MarkupResemblesLocatorWarning
+warnings.filterwarnings('ignore', category=MarkupResemblesLocatorWarning)
+
 # IP
 
 
@@ -38,10 +43,23 @@ def URL_extractor(input):
 # HTML
 
 
-def html_check(input):
-    soup = BeautifulSoup(input, 'html.parser')
-    return soup.find() is not None
+def html_text_extractor(input: str) -> str:
+    try:
+        soup = BeautifulSoup(input, 'lxml')
+        if soup.find() is not None:
+            plain_text = soup.get_text(strip=True, separator=' ')
+            return plain_text
+    except Exception as e:
+        print("ERROR", e)
+    return input
 
+def html_image_replacer(input:str, image_src: str, text: str) -> str:
+    if input is not None and image_src is not None and text is not None:
+        # print(image_src,text)
+        soup = BeautifulSoup(input, 'lxml')
+        [tag.replace_with(text) for tag in soup.find_all('img', src=image_src)]
+        return str(soup)
+    return input
 
 # DOMAIN
 
@@ -61,14 +79,14 @@ def domain_age_extractor(domain: str) -> int:
         # print(domain_info)
         creation_date = domain_info.creation_date
         if isinstance(creation_date, str):
-            return None
+            return -1
 
         if isinstance(creation_date, list):
             creation_date = creation_date[0]
 
         if creation_date:
             return (datetime.now() - creation_date).days
-        return None
+        return -1
 
     except whois.parser.PywhoisError:
         print(f"Error retrieving WHOIS information for {domain}.")
@@ -108,7 +126,7 @@ def all_DNS_record_extractor(domain):
 # TODO: find a reliable way to check the domain reputation/report status
 
 
-def domain_rep_extractor(domain: str) -> float:
+def domain_rep_extractor(domain: str):
 
     try:
         res = pydnsbl.DNSBLDomainChecker().check(domain)
@@ -119,7 +137,7 @@ def domain_rep_extractor(domain: str) -> float:
 # DMARC, DKIM, SPF
 
 
-def DMARC_extractor(domain: str) -> (str, int):
+def DMARC_extractor(domain: str) -> tuple[str, int]:
     try:
         response = dns.resolver.resolve(f'_dmarc.{domain}', 'TXT')
         for data in response:
@@ -130,7 +148,7 @@ def DMARC_extractor(domain: str) -> (str, int):
         return 'DMARC not found', -1
 
 
-def DKIM_extractor(domain: str, selector: str) -> (str, int):
+def DKIM_extractor(domain: str, selector: str) -> tuple[str, int]:
     try:
         response = dns.resolver.resolve(
             selector + '._domainkey.' + domain, 'TXT')
@@ -142,7 +160,7 @@ def DKIM_extractor(domain: str, selector: str) -> (str, int):
         return 'DKIM not found', -1
 
 
-def SPF_extractor(domain: str) -> (str, int):
+def SPF_extractor(domain: str) -> tuple[str, int]:
     try:
         response = dns.resolver.resolve(domain, 'TXT')
         for data in response:
@@ -185,9 +203,9 @@ def sender_filter(mail, filter: list) -> int:
     '''
     Return list codes:
     - 0 = Not found
-    - 1 = Everything is ok. Sender found.
+    - 1 = Reply-To mismatch. Sender found.
     - 2 = Return-Path mismatch. Sender found.
-    - 3 = Reply-To mismatch. Sender found.
+    - 3 = Everything is ok. Sender found.
     '''
 
     if header_check_filter(mail, "From", filter):
@@ -196,8 +214,8 @@ def sender_filter(mail, filter: list) -> int:
         if mail['Return-Path'] and fr[1] != mail['Return-Path']:
             return 2
         if mail['Reply-To'] and fr[1] != mail['Reply-To']:
-            return 3
-        return 1
+            return 1
+        return 3
     return 0
 
 # RECV
@@ -220,7 +238,7 @@ def text_language_extractor(text):
         ).with_preloaded_language_models().build()
     if isinstance(text, list):
         return __detector.detect_languages_in_parallel_of(text)
-    return __detector.detect_language_of(str(text))
+    return [__detector.detect_language_of(str(text))]
 
 
 def text_language_filter(text, filter: Language) -> bool:
@@ -229,9 +247,11 @@ def text_language_filter(text, filter: Language) -> bool:
         __detector = LanguageDetectorBuilder.from_all_languages(
         ).with_preloaded_language_models().build()
     if isinstance(text, list):
-        for response in text_language_extractor(text):
-            if response == filter:
-                return True
+        lang = text_language_extractor(text)
+        if lang is not None:
+            for response in lang:
+                if response == filter:
+                    return True
     elif text_language_extractor(text) == filter:
         return True
     return False
@@ -241,7 +261,7 @@ def text_language_filter(text, filter: Language) -> bool:
 
 def subject_extractor(mail: email.message.Message) -> str:
     if mail['subject'] is None:
-        return '<WARNING: NO_SUBJECT>'
+        return ''
     subject = email.header.decode_header(mail['subject'])[0][0]
     if not isinstance(subject, str):
         return subject.decode()
@@ -249,28 +269,96 @@ def subject_extractor(mail: email.message.Message) -> str:
 
 
 def subject_filter(mail: email.message.Message, filter: list) -> bool:
-    if subject_extractor(mail) == '<WARNING: NO_SUBJECT>':
+    if subject_extractor(mail) == '':
         return False
     return text_based_filter(subject_extractor(mail), filter)
 
 
 # IMAGES
 
-def image_text_extractor(mail: email.message.Message)->list:
+def image_text_extractor(mail: email.message.Message) -> list:
     images = []
     for part in mail.walk():
-        if part.get_content_maintype() == 'image':
-            data = part.get_payload(decode=True)
-            try:
-                image = Image.open(io.BytesIO(data))
-                images.append(image)
-            except Exception as e:
-                print('Error on image proccesing:', e)
-    extracted_text = []
+        im = __get_image_part_decoded(part)
+        if im is not None:
+            images.append(im)
+    text = []
     for idx, image in enumerate(images):
+        t = __image_ocr_helper(image)
+        if t is not None:
+            text.append(t)
+    return text 
+
+
+def __image_ocr_helper(image) -> str:
         try:
-            text = pytesseract.image_to_string(image)
-            extracted_text.append(text)
+            return pytesseract.image_to_string(image)
         except Exception as e:
-            print("Error on character detection:", e)
-    return extracted_text
+            print(f"Error on image character detection:", e)
+            return ''
+
+# BODY
+
+
+def body_extractor(mail: email.message.Message) -> list:
+    if not mail.is_multipart():
+        # print('Not multipart')
+        return mail.get_payload(decode=True).decode().removesuffix('\n\n')
+    result = []
+    for part in mail.walk():
+        info = __get_text_part_decoded(part)
+        if part.get_content_disposition() is None and info is not None:
+            result.append(info)
+    return result
+
+def body_filter(mail: email.message.Message, filters: list) -> bool:
+    t = all_text_extractor(mail)
+    if len(t) < 4:
+        return True
+    return text_based_filter(t, filters)
+
+# TEXT
+
+
+def all_text_extractor(mail: email.message.Message) -> str:
+    text = subject_extractor(mail) + "\n\n"
+    if not mail.is_multipart():
+        text += mail.get_payload(decode=True).decode().removesuffix('\n\n')
+    else: 
+        images_text = {}
+        for part in mail.walk():
+            c=part.get_content_type()+'\n'
+            if c.startswith('image'):
+                try:
+                    im = __get_image_part_decoded(part)
+                    cid = part.get('Content-ID')
+                    if im is not None and cid is not None:
+                        images_text[cid[1:-1]] = __image_ocr_helper(im)
+                except Exception as e:
+                    print('ERROR:', e)
+        for part in mail.walk():
+            c=part.get_content_type()+'\n'
+            if c.startswith('text'):
+                tmp = part.get_payload(decode=True).decode(errors='ignore')
+                for i in images_text:
+                    tmp = html_image_replacer(tmp, "cid:"+i, images_text[i])
+                tmp = html_text_extractor(tmp)
+                text += re.sub(r"( +)|[\n\r\t]+", " ", tmp)+'\n'
+    return text
+
+# PART BASED
+
+
+def __get_text_part_decoded(part: email.message.Message) -> str:
+    # print(part.get_content_maintype(), end="||")
+    if part.get_content_maintype() == 'text':
+        return part.get_payload(decode=True).decode(errors='ignore').removesuffix('\n\n')
+    return ''
+
+
+def __get_image_part_decoded(part: email.message.Message):
+    if part.get_content_maintype() == 'image':
+        try:
+            return Image.open(io.BytesIO(part.get_payload(decode=True)))
+        except Exception as e:
+            print('Error on image proccesing:', e)
